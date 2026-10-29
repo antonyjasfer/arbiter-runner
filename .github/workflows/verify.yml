@@ -1,0 +1,178 @@
+# Arbiter verification runner (Phase 1 spike). Lives in the PUBLIC repo arbiter-runner, default branch.
+#
+# Security model (CLAUDE.md rule 4):
+#  - permissions: {} on the workflow and on every job; the runner repo is never checked out.
+#  - Inputs are NEVER interpolated inside `run:`. They reach shell only through `env:` and are validated by the
+#    `validate` job first. `run-name` uses run_id for display only (never executed).
+#  - Untrusted repo code runs ONLY in the `tests` job, which references no `secrets.*`. Assume that VM is fully compromised by repo code
+#    (the runner user has sudo and can read process environments): the control is that NO secret exists in the job, not env -i.
+#    No artifact is uploaded from `tests` (an upload action would run with the job's artifact credentials after untrusted code);
+#    test output evidence is the job log via the Jobs/Logs API and the public run URL, and it is freelancer-controlled.
+#  - The only job that references a secret is `canary-holder`, which runs no repo code. The production runner holds no secrets at all.
+#  - GitHub-hosted runners have OPEN internet egress; there is no allow-list. Mitigations: no secrets, fresh VM, timeouts, public repos only.
+#  - Verdicts are read by Arbiter from GitHub's Jobs API (job/step conclusions), not from files the test code could write.
+name: verify
+run-name: verify ${{ inputs.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: "https://github.com/<owner>/<repo>"
+        required: true
+        type: string
+      commit_sha:
+        description: "40-character lowercase hex commit SHA"
+        required: true
+        type: string
+      run_id:
+        description: "Arbiter run id (digits only)"
+        required: true
+        type: string
+      deploy_url:
+        description: "https URL of the deployed site for the browser checks"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: validate inputs
+        shell: bash
+        env:
+          REPO_URL: ${{ inputs.repo_url }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          RUN_ID: ${{ inputs.run_id }}
+          DEPLOY_URL: ${{ inputs.deploy_url }}
+        run: |
+          set -eu
+          export LC_ALL=C
+          # Same patterns as spikes/lib/github.ts. Values are never printed (they could contain control sequences).
+          repo_re='^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+          sha_re='^[0-9a-f]{40}$'
+          run_re='^[0-9]{1,18}$'
+          url_re='^https://[A-Za-z0-9.-]+(/[!-~]*)?$'
+          bad=0
+          nl=$'\n'
+          check() { # name value regex
+            if [[ "$2" == *"$nl"* ]] || ! [[ "$2" =~ $3 ]]; then
+              echo "REJECTED: $1 does not match the allowed pattern"
+              bad=1
+            fi
+          }
+          check repo_url "$REPO_URL" "$repo_re"
+          check commit_sha "$COMMIT_SHA" "$sha_re"
+          check run_id "$RUN_ID" "$run_re"
+          check deploy_url "$DEPLOY_URL" "$url_re"
+          if [ "$bad" -ne 0 ]; then exit 1; fi
+          echo "inputs ok"
+
+  canary-holder:
+    # The ONLY job that references a secret. Runs no repo code. Proves the secret exists in this repository.
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: canary
+        shell: bash
+        env:
+          CANARY: ${{ secrets.SPIKE_CANARY }}
+        run: |
+          printf 'canary length: %s\n' "${#CANARY}"
+          [ "${#CANARY}" -gt 0 ]
+
+  tests:
+    # Untrusted code only. No secrets.* anywhere in this job. No artifact upload (see header).
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 10
+    steps:
+      - name: node versions
+        shell: bash
+        run: node -v && npm -v && git --version
+
+      - name: fetch
+        shell: bash
+        env:
+          REPO_URL: ${{ inputs.repo_url }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/logs" work
+          cd work
+          git init -q
+          git -c core.hooksPath=/dev/null -c protocol.file.allow=never fetch -q --depth 1 -- "$REPO_URL" "$COMMIT_SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --format='checked out %H'
+
+      - name: install
+        shell: bash
+        working-directory: work
+        run: |
+          # shell: bash already implies -eo pipefail. env -i only avoids accidental inheritance; it is not a security control.
+          env -i PATH="$PATH" HOME="$HOME" CI=true npm ci --no-audit --no-fund 2>&1 | tee "$RUNNER_TEMP/logs/install.log"
+
+      - name: unit-tests
+        shell: bash
+        working-directory: work
+        run: |
+          env -i PATH="$PATH" HOME="$HOME" CI=true npm test 2>&1 | tee "$RUNNER_TEMP/logs/test.log"
+
+  browser:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 10
+    steps:
+      - name: playwright-install
+        shell: bash
+        run: |
+          set -eu
+          mkdir pw && cd pw
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.64.1
+          npx playwright install --with-deps chromium
+
+      - name: browser-checks
+        shell: bash
+        working-directory: pw
+        # Chromium runs without its sandbox here (Playwright default) and follows redirects; nothing valuable is on the VM,
+        # but the screenshot is public and may show wherever the URL redirects.
+        env:
+          DEPLOY_URL: ${{ inputs.deploy_url }}
+        run: |
+          set -eu
+          cat > check.mjs <<'JS'
+          import { chromium } from "playwright";
+          const url = process.env.DEPLOY_URL;
+          const browser = await chromium.launch();
+          try {
+            const page = await browser.newPage();
+            const res = await page.goto(url, { timeout: 30000, waitUntil: "load" });
+            const title = await page.title();
+            await page.screenshot({ path: "screenshot.png", fullPage: true });
+            if (!res || res.status() !== 200) throw new Error(`expected HTTP 200, got ${res ? res.status() : "no response"}`);
+            if (!title.trim()) throw new Error("page has an empty <title>");
+            console.log(`browser check ok: status=200, title length=${title.length}`);
+          } finally {
+            await browser.close();
+          }
+          JS
+          node check.mjs
+
+      - name: upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-screenshot
+          path: pw/screenshot.png
+          if-no-files-found: ignore
+          retention-days: 7
