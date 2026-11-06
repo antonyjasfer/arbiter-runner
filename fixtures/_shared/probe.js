@@ -85,7 +85,9 @@ function scan(log = console.log) {
 function redact(text, found) {
   let s = String(text);
   for (const { value } of Object.values(found)) if (value && value.length >= 8) s = s.split(value).join("[redacted]");
-  return s.replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted-jwt]");
+  return s
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted-jwt]")
+    .replace(/(https?:\/\/[^\s?#"']+)[?#][^\s"']*/g, "$1?[redacted-query]"); // signed blob URLs carry SAS tokens
 }
 
 module.exports = { scan, redact };
