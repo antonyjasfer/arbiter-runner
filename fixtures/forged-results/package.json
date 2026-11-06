@@ -1,0 +1,14 @@
+{
+  "name": "arbiter-spike-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hostile fixture: npm test tries to upload a forged arbiter-results artifact marking everything passed.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@actions/artifact": "6.3.1",
+    "ms": "2.1.3"
+  }
+}

@@ -1,36 +1,48 @@
-# Arbiter verification runner (Phase 1 spike). Lives in the PUBLIC repo arbiter-runner, default branch.
+# Arbiter verification runner (Phase 4). Lives in the PUBLIC repo arbiter-runner, default branch.
+# Dispatched by Arbiter (web/src/server/verification/runner-client.ts dispatchVerify) with workflow_dispatch.
 #
 # Security model (CLAUDE.md rule 4):
-#  - permissions: {} on the workflow and on every job; the runner repo is never checked out.
-#  - Inputs are NEVER interpolated inside `run:`. They reach shell only through `env:` and are validated by the
-#    `validate` job first. `run-name` uses run_id for display only (never executed).
-#  - Untrusted repo code runs ONLY in the `tests` job, which references no `secrets.*`. Assume that VM is fully compromised by repo code
-#    (the runner user has sudo and can read process environments): the control is that NO secret exists in the job, not env -i.
-#    No artifact is uploaded from `tests` (an upload action would run with the job's artifact credentials after untrusted code);
-#    test output evidence is the job log via the Jobs/Logs API and the public run URL, and it is freelancer-controlled.
-#  - The only job that references a secret is `canary-holder`, which runs no repo code. The production runner holds no secrets at all.
-#  - GitHub-hosted runners have OPEN internet egress; there is no allow-list. Mitigations: no secrets, fresh VM, timeouts, public repos only.
-#  - Verdicts are read by Arbiter from GitHub's Jobs API (job/step conclusions), not from files the test code could write.
+#  - permissions: {} on the workflow and on every job. This repository holds NO secrets, and no job uses the secrets context.
+#  - Inputs are NEVER interpolated inside `run:`. They reach the shell only through `env:` and are regex-checked by the
+#    `validate` job before any other job starts. `run-name` is the dispatch-key UUID: display only, never executed, and
+#    Arbiter matches the run by it (display_title).
+#  - Job order is validate -> browser -> tests. The trusted `browser` job runs and uploads the single results artifact
+#    `arbiter-results` BEFORE any untrusted code runs. Untrusted code (the freelancer repo) runs ONLY in `tests`.
+#  - `permissions: {}` does not stop an artifact upload (uploads use the runner's own runtime token, not GITHUB_TOKEN),
+#    so untrusted code in `tests` could try to upload a forged `arbiter-results`. Arbiter rejects the run
+#    (error_code unexpected_artifacts) if it has any other artifact, a second `arbiter-results`, or one created after
+#    the `tests` job started. Assume the `tests` VM is fully compromised by repo code (sudo, process environments):
+#    the control is that no secret exists there, not env -i.
+#  - This repo is never checked out in the job that runs untrusted code. The `browser` job (trusted, no repo code) fetches
+#    only this public repo at the workflow's own commit, anonymously, to get the DSL interpreter in browser/.
+#  - GitHub-hosted runners have OPEN internet egress; there is no allow-list. Mitigations: no secrets, a fresh VM,
+#    timeouts, public repos only.
+#  - Verdicts: tests come from the Jobs API (job/step conclusions), browser checks from arbiter-results/results.json,
+#    which only the browser job writes and which holds fixed reason codes, never site text.
 name: verify
-run-name: verify ${{ inputs.run_id }}
+run-name: ${{ inputs.run_name }}
 
 on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: "https://github.com/<owner>/<repo>"
+        description: "https://github.com/<owner>/<repo> (public)"
         required: true
         type: string
-      commit_sha:
+      sha:
         description: "40-character lowercase hex commit SHA"
-        required: true
-        type: string
-      run_id:
-        description: "Arbiter run id (digits only)"
         required: true
         type: string
       deploy_url:
         description: "https URL of the deployed site for the browser checks"
+        required: true
+        type: string
+      run_name:
+        description: "Arbiter dispatch key (lowercase UUID)"
+        required: true
+        type: string
+      plan_b64:
+        description: "Base64 of the check plan JSON (Arbiter's restricted DSL, never code)"
         required: true
         type: string
 
@@ -46,17 +58,20 @@ jobs:
         shell: bash
         env:
           REPO_URL: ${{ inputs.repo_url }}
-          COMMIT_SHA: ${{ inputs.commit_sha }}
-          RUN_ID: ${{ inputs.run_id }}
+          COMMIT_SHA: ${{ inputs.sha }}
           DEPLOY_URL: ${{ inputs.deploy_url }}
+          RUN_NAME: ${{ inputs.run_name }}
+          PLAN_B64: ${{ inputs.plan_b64 }}
         run: |
           set -eu
           export LC_ALL=C
-          # Same patterns as spikes/lib/github.ts. Values are never printed (they could contain control sequences).
+          # Same patterns as web/src/server/verification/submissions.ts and runner-client.ts.
+          # Values are never printed (they could contain control sequences).
           repo_re='^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
           sha_re='^[0-9a-f]{40}$'
-          run_re='^[0-9]{1,18}$'
           url_re='^https://[A-Za-z0-9.-]+(/[!-~]*)?$'
+          uuid_re='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          b64_re='^[A-Za-z0-9+/]+={0,2}$'
           bad=0
           nl=$'\n'
           check() { # name value regex
@@ -66,113 +81,98 @@ jobs:
             fi
           }
           check repo_url "$REPO_URL" "$repo_re"
-          check commit_sha "$COMMIT_SHA" "$sha_re"
-          check run_id "$RUN_ID" "$run_re"
+          check sha "$COMMIT_SHA" "$sha_re"
           check deploy_url "$DEPLOY_URL" "$url_re"
+          check run_name "$RUN_NAME" "$uuid_re"
+          check plan_b64 "$PLAN_B64" "$b64_re"
+          if [ "${#PLAN_B64}" -gt 60000 ]; then echo "REJECTED: plan_b64 is longer than 60000 characters"; bad=1; fi
           if [ "$bad" -ne 0 ]; then exit 1; fi
           echo "inputs ok"
 
-  canary-holder:
-    # The ONLY job that references a secret. Runs no repo code. Proves the secret exists in this repository.
-    needs: validate
-    runs-on: ubuntu-latest
-    permissions: {}
-    timeout-minutes: 2
-    steps:
-      - name: canary
-        shell: bash
-        env:
-          CANARY: ${{ secrets.SPIKE_CANARY }}
-        run: |
-          printf 'canary length: %s\n' "${#CANARY}"
-          [ "${#CANARY}" -gt 0 ]
-
-  tests:
-    # Untrusted code only. No secrets.* anywhere in this job. No artifact upload (see header).
+  browser:
+    # Trusted. Runs no freelancer code and has no checkout of the freelancer repo. Uploads the only results artifact.
     needs: validate
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 10
     steps:
-      - name: node versions
+      - name: fetch interpreter
         shell: bash
-        run: node -v && npm -v && git --version
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -eu
+          # GITHUB_SERVER_URL, GITHUB_REPOSITORY and GITHUB_WORKFLOW_SHA are GitHub's default variables (not inputs).
+          [[ "$GITHUB_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "REJECTED: workflow sha"; exit 1; }
+          git init -q interp
+          cd interp
+          git -c core.hooksPath=/dev/null -c protocol.file.allow=never fetch -q --depth 1 -- "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_WORKFLOW_SHA"
+          git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD
+          git log -1 --format='interpreter at %H'
 
+      - name: install playwright
+        shell: bash
+        working-directory: interp/browser
+        run: |
+          set -eu
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: run plan
+        shell: bash
+        working-directory: interp/browser
+        env:
+          PLAN_B64: ${{ inputs.plan_b64 }}
+          DEPLOY_URL: ${{ inputs.deploy_url }}
+          RUN_NAME: ${{ inputs.run_name }}
+        run: |
+          set -eu
+          # Exit 0: results written (checks may have failed). 2: plan rejected (results say plan_invalid). 3: bad env.
+          OUT_DIR="$RUNNER_TEMP/arbiter-results" node run-plan.mjs
+
+      - name: upload results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: arbiter-results
+          path: ${{ runner.temp }}/arbiter-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  tests:
+    # Untrusted code only. No secrets context anywhere, and no artifact upload. Starts only after `browser` has finished,
+    # so the trusted results artifact already exists. Runs even if a browser check failed, but not after a cancel.
+    needs: [validate, browser]
+    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 10
+    steps:
       - name: fetch
         shell: bash
         env:
           REPO_URL: ${{ inputs.repo_url }}
-          COMMIT_SHA: ${{ inputs.commit_sha }}
+          COMMIT_SHA: ${{ inputs.sha }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           set -eu
-          mkdir -p "$RUNNER_TEMP/logs" work
+          mkdir work
           cd work
           git init -q
           git -c core.hooksPath=/dev/null -c protocol.file.allow=never fetch -q --depth 1 -- "$REPO_URL" "$COMMIT_SHA"
-          git checkout -q FETCH_HEAD
+          git -c core.hooksPath=/dev/null checkout -q FETCH_HEAD
           git log -1 --format='checked out %H'
 
-      - name: install
+      - name: npm ci
         shell: bash
         working-directory: work
         run: |
-          # shell: bash already implies -eo pipefail. env -i only avoids accidental inheritance; it is not a security control.
-          env -i PATH="$PATH" HOME="$HOME" CI=true npm ci --no-audit --no-fund 2>&1 | tee "$RUNNER_TEMP/logs/install.log"
+          # Install scripts run (a postinstall is part of the freelancer's code). env -i only avoids accidental
+          # inheritance; it is not the security control (there are no secrets on this VM).
+          env -i PATH="$PATH" HOME="$HOME" CI=true npm ci --no-audit --no-fund
 
-      - name: unit-tests
+      - name: npm test
         shell: bash
         working-directory: work
         run: |
-          env -i PATH="$PATH" HOME="$HOME" CI=true npm test 2>&1 | tee "$RUNNER_TEMP/logs/test.log"
-
-  browser:
-    needs: validate
-    runs-on: ubuntu-latest
-    permissions: {}
-    timeout-minutes: 10
-    steps:
-      - name: playwright-install
-        shell: bash
-        run: |
-          set -eu
-          mkdir pw && cd pw
-          npm init -y >/dev/null
-          npm install --no-audit --no-fund playwright@1.64.1
-          npx playwright install --with-deps chromium
-
-      - name: browser-checks
-        shell: bash
-        working-directory: pw
-        # Chromium runs without its sandbox here (Playwright default) and follows redirects; nothing valuable is on the VM,
-        # but the screenshot is public and may show wherever the URL redirects.
-        env:
-          DEPLOY_URL: ${{ inputs.deploy_url }}
-        run: |
-          set -eu
-          cat > check.mjs <<'JS'
-          import { chromium } from "playwright";
-          const url = process.env.DEPLOY_URL;
-          const browser = await chromium.launch();
-          try {
-            const page = await browser.newPage();
-            const res = await page.goto(url, { timeout: 30000, waitUntil: "load" });
-            const title = await page.title();
-            await page.screenshot({ path: "screenshot.png", fullPage: true });
-            if (!res || res.status() !== 200) throw new Error(`expected HTTP 200, got ${res ? res.status() : "no response"}`);
-            if (!title.trim()) throw new Error("page has an empty <title>");
-            console.log(`browser check ok: status=200, title length=${title.length}`);
-          } finally {
-            await browser.close();
-          }
-          JS
-          node check.mjs
-
-      - name: upload screenshot
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-screenshot
-          path: pw/screenshot.png
-          if-no-files-found: ignore
-          retention-days: 7
+          env -i PATH="$PATH" HOME="$HOME" CI=true npm test

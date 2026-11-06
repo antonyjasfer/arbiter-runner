@@ -1,0 +1,14 @@
+{
+  "name": "arbiter-spike-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hostile fixture: a postinstall that hunts for credentials, and a test that prints PASS but fails.",
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}

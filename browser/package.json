@@ -1,0 +1,11 @@
+{
+  "name": "arbiter-runner-browser",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Interprets an Arbiter check plan (a restricted DSL, never code) with Playwright against a deployed site.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test \"test/*.test.mjs\"" },
+  "dependencies": { "playwright": "1.65.0" }
+}

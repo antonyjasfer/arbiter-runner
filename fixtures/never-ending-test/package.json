@@ -1,0 +1,13 @@
+{
+  "name": "arbiter-spike-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hostile fixture: npm test never finishes (stopped by the job's timeout-minutes).",
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}
