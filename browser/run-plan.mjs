@@ -201,7 +201,9 @@ export async function runPlan({ plan, deployUrl, outDir, chromium, header = {}, 
     status = "site_unreachable";
     for (const k of keys) criteria[k] = { status: "error", failed_step: null, reason: "site_unreachable", steps: [] };
   } else {
-    const browser = await chromium.launch({ headless: true });
+    // Chromium's own sandbox on (Playwright turns it off by default). The deployed site is untrusted, and this VM
+    // writes the trusted arbiter-results. Tried on the GitHub runner in the Phase 4 smoke run (spikes/FINDINGS.md).
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
     const deadline = now() + b.checksBudgetMs;
     try {
       for (const key of keys) {
