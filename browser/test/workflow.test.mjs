@@ -92,6 +92,9 @@ test("only the browser job uploads, exactly one artifact, named arbiter-results;
   assert.ok(J.browser.some((l) => l.includes("actions/upload-artifact@v7")));
   // Arbiter reads this step's conclusion: success + no arbiter-results artifact means it was deleted (errored run).
   assert.equal(J.browser.filter((l) => /^ {6}- name: upload results$/.test(l)).length, 1);
+  // ...which is only true if a successful upload step means the artifact existed: no files must fail the step.
+  assert.equal(J.browser.filter((l) => /^ {10}if-no-files-found: error$/.test(l)).length, 1);
+  assert.doesNotMatch(text, /if-no-files-found: (ignore|warn)/);
   assert.ok(!J.tests.some((l) => /\buses:/.test(l)), "tests job uses no actions");
   assert.ok(!J.validate.some((l) => /\buses:/.test(l)), "validate job uses no actions");
   assert.doesNotMatch(text, /actions\/checkout/);
