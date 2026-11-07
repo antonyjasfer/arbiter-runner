@@ -118,6 +118,14 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npx playwright install --with-deps chromium
 
+      - name: allow chromium sandbox
+        shell: bash
+        run: |
+          set -eu
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces with AppArmor, so Chromium's sandbox
+          # cannot start ("No usable sandbox!"). Lift that restriction on this trusted, throwaway VM only.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: run plan
         shell: bash
         working-directory: interp/browser
@@ -136,7 +144,9 @@ jobs:
         with:
           name: arbiter-results
           path: ${{ runner.temp }}/arbiter-results
-          if-no-files-found: ignore
+          # error, not ignore: a successful upload step must mean the artifact exists. Arbiter treats "upload step
+          # succeeded but no arbiter-results" as tampering (unexpected_artifacts).
+          if-no-files-found: error
           retention-days: 7
 
   tests:
