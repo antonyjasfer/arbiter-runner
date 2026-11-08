@@ -103,6 +103,9 @@ async function warmUp(url, origin, b, fetchFn, now) {
   return { ok: false, attempts, ms: now() - start, status };
 }
 
+// Elements fill_by_label may type into (Playwright's fill accepts these).
+const FILLABLE = 'input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]):not([type=file]):not([type=hidden]):not([type=range]):not([type=color]), textarea, [contenteditable=""], [contenteditable="true"]';
+
 async function runStep(step, ctx) {
   const { page, url, origin, timeout, gotoTimeout, fetchFn } = ctx;
   switch (step.op) {
@@ -120,7 +123,9 @@ async function runStep(step, ctx) {
       return { actual_status: status };
     }
     case "fill_by_label":
-      await page.getByLabel(step.label).fill(step.value, { timeout });
+      // Only fields you can type into: a label word can also match a list's aria-label (live 8 Nov,
+      // "Task" matched both the "New task" input and <ul aria-label="Tasks">).
+      await page.getByLabel(step.label).and(page.locator(FILLABLE)).fill(step.value, { timeout });
       return {};
     case "click_by_role":
       await page.getByRole(step.role, { name: step.name }).click({ timeout });
@@ -129,7 +134,7 @@ async function runStep(step, ctx) {
       await page.getByText(step.text).first().waitFor({ state: "visible", timeout });
       return {};
     case "expect_checkbox_checked": {
-      const box = page.getByLabel(step.label);
+      const box = page.getByRole("checkbox", { name: step.label });
       const deadline = Date.now() + timeout;
       await box.waitFor({ state: "attached", timeout });
       for (;;) {

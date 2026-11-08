@@ -27,10 +27,26 @@ document.getElementById("add").onclick = () => {
 };
 </script></body></html>`;
 
+// The live pass demo's markup (8 Nov): the input's label "New task" and the list's aria-label "Tasks" both
+// contain "Task", and each task's checkbox is wrapped in its label.
+const DEMO = `<!doctype html><html><body><h1>TaskBoard</h1>
+<form id="f"><label>New task <input id="n" type="text"></label><button type="submit">Add</button></form>
+<ul id="tasks" aria-label="Tasks"></ul>
+<script>
+document.getElementById("f").onsubmit = (e) => {
+  e.preventDefault();
+  const li = document.createElement("li");
+  li.innerHTML = '<label><input type="checkbox"> <span></span></label>';
+  li.querySelector("span").textContent = document.getElementById("n").value;
+  document.getElementById("tasks").appendChild(li);
+};
+</script></body></html>`;
+
 let server;
 let base;
 before(async () => {
   server = http.createServer((req, res) => {
+    if (req.url === "/demo") return res.writeHead(200, { "content-type": "text/html" }).end(DEMO);
     if (req.url === "/") return res.writeHead(200, { "content-type": "text/html" }).end(PAGE);
     if (req.url === "/api/health") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "ok", up: true, n: 3 }));
     if (req.url === "/text") return res.writeHead(200, { "content-type": "text/plain" }).end("not json");
@@ -76,6 +92,19 @@ test("a passing browser flow: every step passes and one screenshot is stored", a
   const size = statSync(join(outDir, shot)).size;
   assert.ok(size > 0 && size <= 300 * 1024, `screenshot ${size} bytes`);
   assert.equal(c.steps[0].actual_status, 200);
+});
+
+test("fill_by_label targets only fields you can type into, and expect_checkbox_checked only checkboxes (live 8 Nov)", async () => {
+  const add = [{ op: "goto", path: "/demo" }, { op: "fill_by_label", label: "Task", value: "Buy milk" }, { op: "click_by_role", role: "button", name: "Add" }];
+  const { r } = await run({
+    m5c1: { kind: "browser", steps: [...add, { op: "expect_text", text: "Buy milk" }] },
+    m5c2: { kind: "browser", steps: [...add, { op: "click_by_role", role: "checkbox", name: "Buy milk" }, { op: "expect_checkbox_checked", label: "Buy milk" }] },
+    m5c3: { kind: "browser", steps: [...add, { op: "expect_checkbox_checked", label: "Buy milk" }] },
+  });
+  assert.equal(r.criteria.m5c1.status, "pass", JSON.stringify(r.criteria.m5c1));
+  assert.equal(r.criteria.m5c2.status, "pass", JSON.stringify(r.criteria.m5c2));
+  assert.equal(r.criteria.m5c3.status, "fail", "an unticked box still fails");
+  assert.equal(r.criteria.m5c3.failed_step, 3);
 });
 
 test("http_get checks status and top-level JSON equality, follows same-origin redirects only", async () => {
